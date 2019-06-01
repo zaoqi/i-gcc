@@ -1,5 +1,5 @@
 {
-    "name": "i-gcc",
+    "name": "ya-igcc",
     "version": "0.0.2",
     "description": "igcc is an interactive shell for C development, which can be utilized like REPL (Read-Eval-Print-Loop) for dynamic languages such as Lisp.",
     "repository": "https://github.com/zaoqi/i-gcc",
