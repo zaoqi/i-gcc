@@ -22,20 +22,19 @@ readonly copy="(C) 2018 TANI Kojiro <kojiro0531@gmail.com>
 lines=()
 count=0
 libs=()
+lang='c'
 cmds=()
-if type clang >/dev/null 2>/dev/null; then
-  cc=clang
-else
-  cc=gcc
-fi
+for cc in gcc clang; do
+  type "$cc" >/dev/null 2>/dev/null && break
+done
 CC(){
-  "$cc" "$@"
+  LANG= "$cc" "$@"
 }
 ccversion(){
   CC -v 2>&1 | grep version
 }
 headers=(stdio.h)
-prog="$(basename $0)"
+prog="$(basename "$0")"
 not_interactive=""
 pre_scripts=()
 add-pre_scripts(){
@@ -67,9 +66,7 @@ function possible-completions () {
   local word
   
   for word in "${candidates[@]}"; do
-    if [ "${#word}" -gt "${#longest}" ]; then
-      longest="$word"
-    fi
+    [ "${#word}" -gt "${#longest}" ] && longest="$word"
   done
   local n=$((${#longest} + 5))
   local cols="$(tput cols)"
@@ -217,17 +214,17 @@ function compile-and-run () {
   local src="$(create-source)"
   if [ -z "$not_interactive" ]; then
     local output="$(\
-      echo "$src" | CC -xc -o "$bin" -DPRINT \
+      echo "$src" | CC -x"$lang" -o "$bin" -DPRINT \
       -DCOUNT=$count "${cmds[@]}" - 2>&1 || \
-      echo "$src" | CC -xc -o "$bin" \
+      echo "$src" | CC -x"$lang" -o "$bin" \
       -DCOUNT=$count "${cmds[@]}" - 2>&1)"
   else
-    local output="$(echo "$src" | CC -xc -o "$bin" -DSCRIPT "${cmds[@]}" - 2>&1)"
+    local output="$(echo "$src" | CC -x"$lang" -o "$bin" -DSCRIPT "${cmds[@]}" - 2>&1)"
   fi
   if [ -x "$bin" ]; then
     if [ -z "$not_interactive" ]; then
       local result="$("$bin" 2>&1 || echo failed)"
-      if [ ! -z "$result" ]; then
+      if [ -n "$result" ]; then
         let count--
         lines=("${lines[@]:0:$count}")
         print-error "Segmentation fault."
@@ -299,7 +296,7 @@ function command-include () {
   else
     if [ -z "$(echo "${headers[*]}" | grep -o "$header")" ]; then
       if [ -n "$(echo \#include \""$header"\" |\
-              CC -xc "${cmds[@]}" - 2>&1 | grep -o main)" ]; then
+              CC -x"$lang" "${cmds[@]}" - 2>&1 | grep -o main)" ]; then
         headers+=("$header")
         print-success "(${headers[*]})"
       else
@@ -317,7 +314,7 @@ function command-lib () {
     print-success "(${libs[*]})"
   else
     if [ -z "$(echo "${libs[@]}" | grep -o "$lib")" ]; then
-      if [ -z "$(CC "${cmds[@]}" "-l$2" 2>&1 | grep -o main)" ]; then
+      if [ -z "$(CC -x"$lang" "${cmds[@]}" "-l$2" 2>&1 | grep -o main)" ]; then
         print-error "Could not find \`lib$lib.so\`."
       else
         libs+=("-l$lib")
@@ -397,7 +394,7 @@ function command-show () {
 function validate-line () {
   local line="$(add-semicolon-if-needed "$*")"
   echo "void main() { "$line" }" |\
-    CC -xc -w -fsyntax-only - 2>&1 |\
+    CC -x"$lang" -w -fsyntax-only - 2>&1 |\
     grep -E "error: expected declaration or statement at end of input" >/dev/null
   echo "$?" 
 }
@@ -408,10 +405,7 @@ function read-multiline () {
   local prompt="$(prompt |\
     sed -e "s/[[:cntrl:]]\[[0-9]*m//g" -e "s/././g" | cut -b 2-) "
   
-  while true; do
-   if [ "$(validate-line "${buf[@]}")" -eq 1 ]; then
-      break
-    fi
+  while [ "$(validate-line "${buf[@]}")" -ne 1 ]; do
     if [ -z "$not_interactive" ]; then
       read -erp "$prompt" line
     else
@@ -439,12 +433,9 @@ function main-loop () {
     fi
     history -s "$line"
     if [ -n "$is_eof" ]; then
-      if [ -z "$not_interactive" ]; then
-          exit 0
-      else
-        IFS= compile-and-run
-        break
-      fi
+      [ -z "$not_interactive" ] && exit 0
+      IFS= compile-and-run
+      break
     elif [ "$line" = ":clear" ]; then
       command-clear
     elif [ "$line" = ":edit" ]; then
@@ -479,15 +470,11 @@ function main-loop () {
         local _IFS="$IFS"
         IFS= lines+=("$line")
         let count++
-        if [ -z "$not_interactive" ]; then
-          compile-and-run
-        fi
+        [ -z "$not_interactive" ] && compile-and-run
         IFS="$_IFS"
       fi
     fi
-    if [ -z "$not_interactive" ];then
-      echo
-    fi
+    [ -z "$not_interactive" ] && echo
   done
 }
 
@@ -498,11 +485,13 @@ Options:
   -h, --help                   show this help and exit.
   -v, --version                show version info and exit.
   -std <standard>              specify c dialect.
-  -i, --interactive <boolean>  interactive or not. default: true
+  -i, --interactive <boolean>  interactive or not. default: true when there is no "--eval" "--require", false in other cases
   -r, --require <file>         interpret file.
   -e, --eval <...>             evaluate script.
+  --read-stdin <boolean>       whether to read from standard input. default: same as interactive
   -Pc <option>                 pass <option> to the c compiler.
   -cc <compiler>               specify c compiler.
+  -x <language>                specify the language. permissible languages include: c. default: c
 EOS
   exit 1
 }
@@ -517,7 +506,7 @@ function set-std () {
     print-error "Missing argument."
     exit 1
   fi
-  if echo | CC -std="$1" -fsyntax-only -xc - >/dev/null 2>&1; then
+  if echo | CC -x"$lang" -std="$1" -fsyntax-only - >/dev/null 2>&1; then
     cmds+=("-std=$1")
   else
     print-error "Unrecognized option: $1"
@@ -525,10 +514,28 @@ function set-std () {
   fi
 }
 
+main_readbool_ret=""
+main_readbool(){
+  case "$1" in
+    'true' | 't' | '1')
+      main_readbool_ret=true
+      ;;
+    'false' | 'f' | '0')
+      main_readbool_ret=false
+      ;;
+    *)
+      show-help-and-exit
+      ;;
+  esac
+}
+
 function main () {
-  local opt
+  local opt=''
   local scripts=()
-  local std
+  local std=''
+  local interactive=''
+  local not_has_pre_scripts=true
+  local read_stdin=''
   for opt in "$@"; do
     case "$opt" in
       '-v' | '--version')
@@ -538,29 +545,22 @@ function main () {
         show-help-and-exit
         ;;
       '-std')
-        set-std "$2"
+        std="$2"
         shift 2
         ;;
       '-i' | '--interactive')
-        case "$2" in
-	  'true' | 't' | '1')
-	    not_interactive=""
-	    ;;
-	  'false' | 'f' | '0')
-	    not_interactive="t"
-	    ;;
-	  *)
-	    show-help-and-exit
-	    ;;
-	esac
+        main_readbool "$2"
+        interactive="$main_readbool_ret"
         shift 2
         ;;
       '-r' | '--require')
         add-pre_scripts "$(cat "$2" | sed -e '/^#!/d')"
+        not_has_pre_scripts=false
         shift 2
         ;;
       '-e' | '--eval')
         add-pre_scripts "$(echo "$2" | sed -e '/^#!/d')"
+        not_has_pre_scripts=false
         shift 2
         ;;
       '-Pc')
@@ -571,22 +571,40 @@ function main () {
 	cc="$2"
 	shift 2
 	;;
+      '-x')
+	lang="$2"
+	shift 2
+	;;
+      '--read-stdin')
+        main_readbool "$2"
+        read_stdin="$main_readbool_ret"
+        shift 2
+	;;
     esac
   done
 
-  [ ! -z "$*" ] && show-help-and-exit
+  [ -z "$interactive" ] && interactive="$not_has_pre_scripts"
+  [ -z "$read_stdin" ] && read_stdin="$interactive"
 
-  [ ! -z "$std" ] && set-std "$std"
+  not_interactive="t"
+  "$interactive" && not_interactive=""
 
-  if [ -z "$not_interactive" ]; then
+  [ -n "$*" ] && show-help-and-exit
+
+  [ -n "$std" ] && set-std "$std"
+
+  "$interactive" &&
 cat << EOS
 $prog $version with $(ccversion)
 $copy
 try \`:help\` to get help. Ctrl-D to exit.
 
 EOS
+  if "$read_stdin"; then
+    main-loop
+  else
+    echo | main-loop
   fi
-  main-loop
 }
 
 main "$@"
