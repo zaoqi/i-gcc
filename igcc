@@ -28,13 +28,25 @@ if type clang >/dev/null 2>/dev/null; then
 else
   cc=gcc
 fi
+CC(){
+  "$cc" "$@"
+}
 ccversion(){
-  "$cc" -v 2>&1 | grep version
+  CC -v 2>&1 | grep version
 }
 headers=(stdio.h)
 prog="$(basename $0)"
 not_interactive=""
 pre_scripts=()
+add-pre_scripts(){
+  local t="$(mktemp)"
+  echo "$*" > "$t"
+  local line
+  while read line; do
+    pre_scripts+=("$line")
+  done < "$t"
+  rm "$t"
+}
 
 completion_candidates=(
   "auto" "break" "case" "char" "const"
@@ -69,7 +81,7 @@ readonly comp_wordbreaks=("(" ")" ";" "{" "}")
 
 function tab-complete () {
   local words=("$READLINE_LINE")
-  if [ "$words" ]; then
+  if [ -n "$words" ]; then
     local slice=(${READLINE_LINE:0:$(($READLINE_POINT + 1))})
     local n=$((${#slice[@]} - 1))
 
@@ -156,7 +168,7 @@ int main (void)
 
 function print-error() {
   printf "\e[31mError:$1\e[m\n"
-  if [ "$not_interactive" ]; then
+  if [ -n "$not_interactive" ]; then
     exit 1
   fi
 }
@@ -205,19 +217,19 @@ function compile-and-run () {
   local src="$(create-source)"
   if [ -z "$not_interactive" ]; then
     local output="$(\
-      echo "$src" | "$cc" -xc -o "$bin" -DPRINT \
+      echo "$src" | CC -xc -o "$bin" -DPRINT \
       -DCOUNT=$count "${cmds[@]}" - 2>&1 || \
-      echo "$src" | "$cc" -xc -o "$bin" \
+      echo "$src" | CC -xc -o "$bin" \
       -DCOUNT=$count "${cmds[@]}" - 2>&1)"
   else
-    local output="$(echo "$src" | "$cc" -xc -o "$bin" -DSCRIPT "${cmds[@]}" - 2>&1)"
+    local output="$(echo "$src" | CC -xc -o "$bin" -DSCRIPT "${cmds[@]}" - 2>&1)"
   fi
   if [ -x "$bin" ]; then
     if [ -z "$not_interactive" ]; then
       local result="$("$bin" 2>&1 || echo failed)"
       if [ ! -z "$result" ]; then
         let count--
-        lines=(${lines[@]:0:$count})
+        lines=("${lines[@]:0:$count}")
         print-error "Segmentation fault."
       fi
     else
@@ -225,7 +237,7 @@ function compile-and-run () {
     fi
   else
     let count--
-    lines=(${lines[@]:0:$count})
+    lines=("${lines[@]:0:$count}")
     print-success "$(echo "$output" | grep -E error: | sort -u)"
     print-error "Failed to compile."
   fi
@@ -238,7 +250,9 @@ function command-help () {
     :edit               invoke ${EDITOR:-vi}.
     :exit               exit $prog.
     :help               show this help.
+    :include            show added header files.
     :include <header>   add header file.
+    :lib                show added shared libraries.
     :lib <library>      add shared library to be linked.
     :load <file>        restore enviroment from <file>.
     :save <file>        save current environment into <file>.      
@@ -272,7 +286,7 @@ function command-edit () {
   if [ -z "$content" ]; then
     print-error "Nothing to compile."
   else
-    lines+=("$(echo "$content")")
+    lines+=("$(echo $content)")
     let count++
     IFS= compile-and-run
   fi
@@ -283,9 +297,9 @@ function command-include () {
   if [ -z "$header" ]; then
     print-success "(${headers[*]})"
   else
-    if [ -z $(echo "${headers[@]}" | grep -o "$header") ]; then
-      if [ -z "$(echo \#include \""$header"\" |\
-              "$cc" -xc "${cmds[@]}" - 2>&1 | grep -o "$header")" ]; then
+    if [ -z "$(echo "${headers[*]}" | grep -o "$header")" ]; then
+      if [ -n "$(echo \#include \""$header"\" |\
+              CC -xc "${cmds[@]}" - 2>&1 | grep -o main)" ]; then
         headers+=("$header")
         print-success "(${headers[*]})"
       else
@@ -303,7 +317,7 @@ function command-lib () {
     print-success "(${libs[*]})"
   else
     if [ -z "$(echo "${libs[@]}" | grep -o "$lib")" ]; then
-      if [ -z "$("$cc" "${cmds[@]}" -l$2 2>&1 | grep -o main)" ]; then
+      if [ -z "$(CC "${cmds[@]}" "-l$2" 2>&1 | grep -o main)" ]; then
         print-error "Could not find \`lib$lib.so\`."
       else
         libs+=("-l$lib")
@@ -335,11 +349,15 @@ function command-save () {
     print-error "Missing filename."
   else
     cat << EOS > "$file"
-lib=(${libs[@]})
-headers=(${headers[@]})
-std=$std
+$(if [ "${#libs[@]}" != 0 ]; then
+  echo "libs=($(printf "\"%q\" " "${libs[@]}"))"
+else
+  echo 'libs=()'
+fi)
+headers=($(printf "%q " "${headers[@]}"))
+std=$(printf "%q" "$std")
 lines=($(printf "%q " "${lines[@]}"))
-count=$count
+count=$(printf "%q" "$count")
 EOS
    print-success "Wrote into \`$file\`."
   fi
@@ -364,7 +382,7 @@ function command-show () {
     IFS=$'\n'
     flag=true
     for line in $(echo "${lines[i]}" | eval "$indent" | eval "$highlight"); do
-      if $flag; then
+      if "$flag"; then
         printf "\e[34m%7s\e[m: " "\$$(($i + 1))"
         flag=false
       else
@@ -379,7 +397,7 @@ function command-show () {
 function validate-line () {
   local line="$(add-semicolon-if-needed "$*")"
   echo "void main() { "$line" }" |\
-    "$cc" -xc -w -fsyntax-only - 2>&1 |\
+    CC -xc -w -fsyntax-only - 2>&1 |\
     grep -E "error: expected declaration or statement at end of input" >/dev/null
   echo "$?" 
 }
@@ -411,17 +429,18 @@ function read-multiline () {
 
 function main-loop () {
   local line
+  local is_eof
   while true; do
     if [ "${#pre_scripts[@]}" != 0 ]; then
-      line="${pre_scripts[*]}"
-      pre_scripts=()
+      line="${pre_scripts[0]}"
+      pre_scripts=("${pre_scripts[@]:1}")
     else
-      read -er -p "$(prompt)" line
+      read -er -p "$(prompt)" line || is_eof=t
     fi
     history -s "$line"
-    if [ -z "$line" ]; then
+    if [ -n "$is_eof" ]; then
       if [ -z "$not_interactive" ]; then
-          :
+          exit 0
       else
         IFS= compile-and-run
         break
@@ -434,8 +453,12 @@ function main-loop () {
       exit 0
     elif [ "$line" = ":help" ]; then
       command-help
+    elif [ "$line" = ":include" ]; then
+      command-include
     elif [[ $line = :include\ * ]]; then
       command-include $line
+    elif [ "$line" = ":lib" ]; then
+      command-lib
     elif [[ $line = :lib\ * ]]; then
       command-lib $line
     elif [[ $line = :load\ * ]]; then
@@ -494,7 +517,7 @@ function set-std () {
     print-error "Missing argument."
     exit 1
   fi
-  if echo | "$cc" -std="$1" -fsyntax-only -xc - >/dev/null 2>&1; then
+  if echo | CC -std="$1" -fsyntax-only -xc - >/dev/null 2>&1; then
     cmds+=("-std=$1")
   else
     print-error "Unrecognized option: $1"
@@ -533,11 +556,11 @@ function main () {
         shift 2
         ;;
       '-r' | '--require')
-        pre_scripts+=("$(cat "$2" | sed -e '/^$/d')")
+        add-pre_scripts "$(cat "$2" | sed -e '/^#!/d')"
         shift 2
         ;;
       '-e' | '--eval')
-        pre_scripts+=("$(echo "$2" | sed -e '/^$/d')")
+        add-pre_scripts "$(echo "$2" | sed -e '/^#!/d')"
         shift 2
         ;;
       '-Pc')
@@ -559,7 +582,7 @@ function main () {
 cat << EOS
 $prog $version with $(ccversion)
 $copy
-try \`:help\` to get help. Ctrl-C to exit.
+try \`:help\` to get help. Ctrl-D to exit.
 
 EOS
   fi
